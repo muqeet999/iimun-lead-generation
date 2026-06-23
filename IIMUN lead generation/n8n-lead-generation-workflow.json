@@ -1,0 +1,877 @@
+{
+  "name": "Indian Lead Generation and Verification",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        540
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "read-lead-requests",
+      "name": "Read Lead Requests",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        460,
+        540
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Lead Requests"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "normalize-request-rows",
+      "name": "Normalize Request Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const inputItems = $input.all();\n\nfunction pickValue(row, candidates) {\n  for (const key of candidates) {\n    if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {\n      return String(row[key]).trim();\n    }\n  }\n  return '';\n}\n\nfunction slugify(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-+|-+$/g, '')\n    .slice(0, 80);\n}\n\nconst output = [];\n\nfor (let index = 0; index < inputItems.length; index++) {\n  const row = inputItems[index].json || {};\n  const category = pickValue(row, ['Category', 'category', 'CATEGORY']);\n  const city = pickValue(row, ['City', 'city', 'CITY']);\n  const leadCountRaw = pickValue(row, ['Lead Count', 'LeadCount', 'lead_count', 'leadCount']);\n  const leadCount = Number.parseInt(leadCountRaw, 10);\n\n  if (!category || !city || !Number.isFinite(leadCount) || leadCount <= 0) {\n    continue;\n  }\n\n  const requestKey = slugify(category) + '__' + slugify(city) + '__' + String(index + 2);\n\n  output.push({\n    json: {\n      requestKey,\n      category,\n      city,\n      leadCount,\n      inputRowNumber: index + 2,\n      requestedAt: new Date().toISOString(),\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "build-search-jobs",
+      "name": "Build Search Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const requests = $input.all().map((item) => item.json);\n\nconst sourceDefinitions = [\n  { sourceLabel: 'bing-general', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" India' },\n  { sourceLabel: 'bing-official', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" official website' },\n  { sourceLabel: 'justdial', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" site:justdial.com' },\n  { sourceLabel: 'sulekha', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" site:sulekha.com' },\n  { sourceLabel: 'indiamart', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" site:indiamart.com' },\n  { sourceLabel: 'webindia123', queryBuilder: (r) => '\"' + r.category + '\" \"' + r.city + '\" site:webindia123.com' },\n];\n\nconst output = [];\n\nfor (const request of requests) {\n  const maxResultsPerQuery = Math.min(Math.max(request.leadCount, 10), 20);\n\n  for (const source of sourceDefinitions) {\n    const query = source.queryBuilder(request);\n    const searchUrl = 'https://www.bing.com/search?setlang=en-IN&count='\n      + String(maxResultsPerQuery)\n      + '&q='\n      + encodeURIComponent(query);\n\n    output.push({\n      json: {\n        ...request,\n        sourceLabel: source.sourceLabel,\n        searchQuery: query,\n        searchUrl,\n        maxResultsPerQuery,\n      },\n    });\n  }\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "search-bing-rss",
+      "name": "Search Bing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        540
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$json.searchUrl}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; n8n Lead Workflow/1.0; +https://n8n.io)"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "responseBody",
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "attach-search-response",
+      "name": "Attach Search Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const sourceItems = $('Build Search Jobs').all();\nconst responseItems = $input.all();\nconst count = Math.max(sourceItems.length, responseItems.length);\nconst output = [];\n\nfor (let index = 0; index < count; index++) {\n  const source = sourceItems[index]?.json || {};\n  const response = responseItems[index]?.json || {};\n  output.push({\n    json: Object.assign({}, source, response),\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "capture-search-fetch-errors",
+      "name": "Capture Search Fetch Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nfunction getStatus(json) {\n  if (json && typeof json.statusCode === 'number') return json.statusCode;\n  if (json && json.response && typeof json.response.statusCode === 'number') return json.response.statusCode;\n  return '';\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const json = item.json || {};\n  const status = getStatus(json);\n  const body = getBody(json);\n  const errorMessage = json.error && json.error.message ? String(json.error.message) : '';\n  const shouldLog = errorMessage || (status && (status < 200 || status >= 300)) || !body;\n\n  if (!shouldLog) {\n    continue;\n  }\n\n  output.push({\n    json: {\n      Timestamp: new Date().toISOString(),\n      Stage: 'Search Fetch',\n      Category: json.category || '',\n      City: json.city || '',\n      Source: json.sourceLabel || '',\n      URL: json.searchUrl || '',\n      Status: status || '',\n      Message: errorMessage || (!body ? 'Empty response body' : 'Non-2xx response'),\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "append-search-logs",
+      "name": "Append Search Logs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1800,
+        320
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Workflow Logs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "parse-rss-search-results",
+      "name": "Parse Search Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nfunction decodeHtmlEntities(value) {\n  return String(value || '')\n    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&#x2F;/gi, '/')\n    .replace(/&#([0-9]+);/g, (_, code) => String.fromCharCode(Number(code)));\n}\n\nfunction stripTags(value) {\n  return decodeHtmlEntities(value)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction extractTag(block, tag) {\n  const match = block.match(new RegExp('<' + tag + '>([\\\\s\\\\S]*?)<\\\\/' + tag + '>', 'i'));\n  return match ? stripTags(match[1]) : '';\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nfunction cleanupUrl(raw) {\n  const value = decodeHtmlEntities(raw || '').trim();\n  if (!value) return '';\n\n  try {\n    const parsed = new URL(value);\n    const redirectTarget = parsed.searchParams.get('r') || parsed.searchParams.get('u');\n    if (parsed.hostname.includes('bing.com') && redirectTarget) {\n      return decodeURIComponent(redirectTarget);\n    }\n    return parsed.toString();\n  } catch (error) {\n    return value;\n  }\n}\n\nfunction domainOf(raw) {\n  try {\n    return new URL(raw).hostname.replace(/^www\\./i, '').toLowerCase();\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction normaliseOrgHint(title, description) {\n  const base = title || description || '';\n  return base\n    .replace(/\\s*[|:-]\\s*(justdial|sulekha|indiamart|webindia123|asklaila).*$/i, '')\n    .replace(/\\s{2,}/g, ' ')\n    .trim();\n}\n\nfunction extractHtmlResults(body) {\n  const results = [];\n  const seenLinks = new Set();\n\n  function pushResult(title, description, link) {\n    const cleaned = cleanupUrl(link);\n    if (!cleaned || seenLinks.has(cleaned)) return;\n    seenLinks.add(cleaned);\n    results.push({\n      title: stripTags(title || ''),\n      description: stripTags(description || ''),\n      link: cleaned,\n    });\n  }\n\n  const algoBlocks = body.match(/<li\\b[^>]*class=[\"'][^\"']*b_algo[^\"']*[\"'][\\s\\S]*?<\\/li>/gi) || [];\n  for (const block of algoBlocks) {\n    const titleMatch = block.match(/<h2[^>]*>[\\s\\S]*?<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)<\\/a>[\\s\\S]*?<\\/h2>/i)\n      || block.match(/<a[^>]+class=[\"'][^\"']*tilk[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)<\\/a>/i);\n    if (!titleMatch) continue;\n    pushResult(titleMatch[2], pickDescription(block), titleMatch[1]);\n  }\n\n  if (results.length === 0) {\n    const fallbackAnchors = body.match(/<a[^>]+href=[\"'](https?:\\/\\/[^\"']+)[\"'][^>]*>[\\s\\S]*?<\\/a>/gi) || [];\n    for (const anchor of fallbackAnchors.slice(0, 50)) {\n      const match = anchor.match(/href=[\"'](https?:\\/\\/[^\"']+)[\"']/i);\n      if (!match) continue;\n      const link = match[1];\n      const domain = domainOf(link);\n      if (!domain || domain.includes('bing.com') || domain.includes('microsoft.com')) continue;\n      const textMatch = anchor.match(/>([^<]{4,120})<\\/a>/i);\n      pushResult(textMatch ? textMatch[1] : domain, '', link);\n    }\n  }\n\n  return results;\n}\n\nfunction pickDescription(block) {\n  const match = block.match(/<p[^>]*>([\\s\\S]*?)<\\/p>/i)\n    || block.match(/<div[^>]*class=[\"'][^\"']*b_caption[^\"']*[\"'][\\s\\S]*?<p[^>]*>([\\s\\S]*?)<\\/p>/i);\n  return match ? stripTags(match[1]) : '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const job = item.json || {};\n  const body = getBody(job);\n\n  if (!body) {\n    continue;\n  }\n\n  let parsedResults = [];\n\n  if (body.indexOf('<item') !== -1) {\n    const blocks = body.match(/<item\\b[\\s\\S]*?<\\/item>/gi) || [];\n    parsedResults = blocks.map((block) => ({\n      title: extractTag(block, 'title'),\n      description: extractTag(block, 'description'),\n      link: cleanupUrl(extractTag(block, 'link')),\n    }));\n  } else if (/<html[\\s>]/i.test(body) || /b_algo|b_results|b_search/i.test(body)) {\n    parsedResults = extractHtmlResults(body);\n  }\n\n  for (const result of parsedResults.slice(0, job.maxResultsPerQuery || 15)) {\n    const title = result.title;\n    const description = result.description;\n    const link = result.link;\n    const domain = domainOf(link);\n\n    if (!link || !domain) {\n      continue;\n    }\n\n    output.push({\n      json: {\n        requestKey: job.requestKey,\n        category: job.category,\n        city: job.city,\n        leadCount: job.leadCount,\n        inputRowNumber: job.inputRowNumber,\n        requestedAt: job.requestedAt,\n        sourceLabel: job.sourceLabel,\n        searchQuery: job.searchQuery,\n        listingUrl: link,\n        listingDomain: domain,\n        orgHint: normaliseOrgHint(title, description),\n        snippet: description,\n      },\n    });\n  }\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "consolidate-candidates",
+      "name": "Consolidate Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all().map((item) => item.json);\n\nconst skipHosts = new Set([\n  'bing.com',\n  'www.bing.com',\n  'facebook.com',\n  'www.facebook.com',\n  'm.facebook.com',\n  'instagram.com',\n  'www.instagram.com',\n  'linkedin.com',\n  'www.linkedin.com',\n  'youtube.com',\n  'www.youtube.com',\n  'x.com',\n  'www.x.com',\n  'twitter.com',\n  'www.twitter.com',\n  'whatsapp.com',\n  'www.whatsapp.com',\n]);\n\nconst sourceWeight = {\n  'bing-official': 60,\n  'bing-general': 50,\n  'justdial': 45,\n  'sulekha': 40,\n  'indiamart': 35,\n  'webindia123': 30,\n};\n\nfunction canonicaliseUrl(raw) {\n  try {\n    const url = new URL(raw);\n    url.hash = '';\n    for (const key of [...url.searchParams.keys()]) {\n      if (/^(utm_|fbclid|gclid|msclkid)/i.test(key)) {\n        url.searchParams.delete(key);\n      }\n    }\n    return url.toString();\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction hostOf(raw) {\n  try {\n    return new URL(raw).hostname.replace(/^www\\./i, '').toLowerCase();\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction slugify(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-+|-+$/g, '');\n}\n\nconst grouped = new Map();\nconst perRequest = new Map();\n\nfor (const item of itemsIn) {\n  const canonicalUrl = canonicaliseUrl(item.listingUrl);\n  const host = hostOf(canonicalUrl);\n\n  if (!canonicalUrl || !host || skipHosts.has(host)) {\n    continue;\n  }\n\n  if (/\\.(pdf|jpg|jpeg|png|gif|webp)$/i.test(canonicalUrl)) {\n    continue;\n  }\n\n  const score = sourceWeight[item.sourceLabel] || 10;\n  const groupKey = item.requestKey + '|' + canonicalUrl;\n  const previous = grouped.get(groupKey);\n\n  if (!previous || score > previous.priority) {\n    grouped.set(groupKey, {\n      ...item,\n      listingUrl: canonicalUrl,\n      listingDomain: host,\n      priority: score,\n    });\n  }\n}\n\nfor (const candidate of grouped.values()) {\n  const requestLimit = Math.min(Math.max((candidate.leadCount || 0) * 6, 30), 120);\n  if (!perRequest.has(candidate.requestKey)) {\n    perRequest.set(candidate.requestKey, []);\n  }\n  perRequest.get(candidate.requestKey).push(candidate);\n}\n\nconst output = [];\n\nfor (const [requestKey, candidates] of perRequest.entries()) {\n  candidates\n    .sort((a, b) => {\n      if (b.priority !== a.priority) return b.priority - a.priority;\n      return slugify(a.orgHint).localeCompare(slugify(b.orgHint));\n    })\n    .slice(0, Math.min(candidates.length, candidates[0].leadCount * 6 || 30, 120))\n    .forEach((candidate) => {\n      output.push({ json: candidate });\n    });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "fetch-candidate-pages",
+      "name": "Fetch Candidate Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2020,
+        540
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$json.listingUrl}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; n8n Lead Workflow/1.0; +https://n8n.io)"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "responseBody",
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "attach-candidate-response",
+      "name": "Attach Candidate Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const sourceItems = $('Consolidate Candidates').all();\nconst responseItems = $input.all();\nconst count = Math.max(sourceItems.length, responseItems.length);\nconst output = [];\n\nfor (let index = 0; index < count; index++) {\n  const source = sourceItems[index]?.json || {};\n  const response = responseItems[index]?.json || {};\n  output.push({\n    json: Object.assign({}, source, response),\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "capture-candidate-fetch-errors",
+      "name": "Capture Candidate Fetch Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nfunction getStatus(json) {\n  if (json && typeof json.statusCode === 'number') return json.statusCode;\n  if (json && json.response && typeof json.response.statusCode === 'number') return json.response.statusCode;\n  return '';\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const json = item.json || {};\n  const status = getStatus(json);\n  const body = getBody(json);\n  const errorMessage = json.error && json.error.message ? String(json.error.message) : '';\n  const shouldLog = errorMessage || (status && (status < 200 || status >= 300)) || !body;\n\n  if (!shouldLog) {\n    continue;\n  }\n\n  output.push({\n    json: {\n      Timestamp: new Date().toISOString(),\n      Stage: 'Candidate Page Fetch',\n      Category: json.category || '',\n      City: json.city || '',\n      Source: json.sourceLabel || '',\n      URL: json.listingUrl || '',\n      Status: status || '',\n      Message: errorMessage || (!body ? 'Empty response body' : 'Non-2xx response'),\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "append-candidate-logs",
+      "name": "Append Candidate Logs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2680,
+        320
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Workflow Logs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "extract-raw-lead-fragments",
+      "name": "Extract Raw Lead Fragments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nconst directoryHosts = [\n  'justdial.com',\n  'sulekha.com',\n  'indiamart.com',\n  'webindia123.com',\n  'asklaila.com',\n  'yellowpages.webindia123.com',\n];\n\nconst socialHosts = [\n  'facebook.com',\n  'instagram.com',\n  'linkedin.com',\n  'youtube.com',\n  'x.com',\n  'twitter.com',\n  'wa.me',\n  'whatsapp.com',\n];\n\nfunction decodeHtmlEntities(value) {\n  return String(value || '')\n    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&#x2F;/gi, '/')\n    .replace(/&#([0-9]+);/g, (_, code) => String.fromCharCode(Number(code)));\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nfunction stripHtml(value) {\n  return decodeHtmlEntities(value)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction slugify(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-+|-+$/g, '');\n}\n\nfunction hostOf(raw) {\n  try {\n    return new URL(raw).hostname.replace(/^www\\./i, '').toLowerCase();\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction originOf(raw) {\n  try {\n    const url = new URL(raw);\n    return url.origin;\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction looksLikeDirectoryHost(host) {\n  return directoryHosts.some((candidate) => host === candidate || host.endsWith('.' + candidate));\n}\n\nfunction looksLikeSocialHost(host) {\n  return socialHosts.some((candidate) => host === candidate || host.endsWith('.' + candidate));\n}\n\nfunction pickFirstMatch(patterns, html) {\n  for (const pattern of patterns) {\n    const match = html.match(pattern);\n    if (match && match[1]) {\n      return decodeHtmlEntities(match[1]).replace(/\\s+/g, ' ').trim();\n    }\n  }\n  return '';\n}\n\nfunction extractEmails(blob) {\n  const matches = blob.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || [];\n  return [...new Set(matches.map((entry) => entry.toLowerCase()))];\n}\n\nfunction extractPhones(blob) {\n  const matches = blob.match(/(?:\\+?91[\\s()-]*)?(?:0[\\s()-]*)?(?:\\d[\\s()-]*){10,12}/g) || [];\n  return [...new Set(matches.map((entry) => entry.trim()))];\n}\n\nfunction extractCandidateUrls(html) {\n  const results = [];\n  const regexes = [\n    /href=[\"'](https?:\\/\\/[^\"'<>\\s]+)[\"']/gi,\n    /(https?:\\/\\/[^\"'<>\\s]+)/gi,\n  ];\n\n  for (const regex of regexes) {\n    let match;\n    while ((match = regex.exec(html)) !== null) {\n      results.push(match[1]);\n    }\n  }\n\n  return [...new Set(results)];\n}\n\nfunction chooseWebsite(listingUrl, html) {\n  const listingHost = hostOf(listingUrl);\n\n  if (listingHost && !looksLikeDirectoryHost(listingHost) && !looksLikeSocialHost(listingHost)) {\n    return originOf(listingUrl);\n  }\n\n  const urls = extractCandidateUrls(html);\n  for (const rawUrl of urls) {\n    const host = hostOf(rawUrl);\n    if (!host) continue;\n    if (host === listingHost) continue;\n    if (looksLikeDirectoryHost(host) || looksLikeSocialHost(host)) continue;\n    if (host.includes('bing.com')) continue;\n    return originOf(rawUrl);\n  }\n\n  return '';\n}\n\nfunction cleanName(value) {\n  return String(value || '')\n    .replace(/\\s*[|:-]\\s*(justdial|sulekha|indiamart|webindia123|asklaila).*$/i, '')\n    .replace(/\\s{2,}/g, ' ')\n    .trim();\n}\n\nfunction chooseOrganizationName(html, text, hint) {\n  const metaTitle = pickFirstMatch([\n    /<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']/i,\n    /<meta[^>]+name=[\"']title[\"'][^>]+content=[\"']([^\"']+)[\"']/i,\n  ], html);\n  const h1 = pickFirstMatch([/<h1[^>]*>([\\s\\S]*?)<\\/h1>/i], html);\n  const title = pickFirstMatch([/<title[^>]*>([\\s\\S]*?)<\\/title>/i], html);\n  const fallback = hint || text.slice(0, 80);\n  return cleanName(metaTitle || h1 || title || fallback);\n}\n\nfunction extractAddress(text, city) {\n  const compactCity = String(city || '').trim();\n  const lines = text\n    .split(/(?<=[.!?])\\s+|\\s{2,}|\\n+/)\n    .map((line) => line.trim())\n    .filter(Boolean);\n\n  for (const line of lines) {\n    const hasCity = compactCity && line.toLowerCase().includes(compactCity.toLowerCase());\n    const hasPin = /\\b\\d{6}\\b/.test(line);\n    const longEnough = line.length >= 18;\n    if (longEnough && (hasCity || hasPin || /address/i.test(line))) {\n      return line.slice(0, 240);\n    }\n  }\n\n  return '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const json = item.json || {};\n  const html = getBody(json);\n\n  if (!html) {\n    continue;\n  }\n\n  const text = stripHtml(html);\n  const organizationName = chooseOrganizationName(html, text, json.orgHint || '');\n  const phones = extractPhones(text + ' ' + html);\n  const emails = extractEmails(text + ' ' + html);\n  const website = chooseWebsite(json.listingUrl || '', html);\n  const address = extractAddress(text, json.city || '');\n  const websiteHost = hostOf(website);\n  const listingHost = hostOf(json.listingUrl || '');\n  const organizationKey = (json.requestKey || '')\n    + '|'\n    + (websiteHost || listingHost || slugify(organizationName))\n    + '|'\n    + slugify(organizationName || json.orgHint || '');\n\n  output.push({\n    json: {\n      requestKey: json.requestKey,\n      category: json.category,\n      city: json.city,\n      leadCount: json.leadCount,\n      inputRowNumber: json.inputRowNumber,\n      requestedAt: json.requestedAt,\n      organizationKey,\n      organizationName,\n      orgHint: json.orgHint || '',\n      sourceLabel: json.sourceLabel,\n      sourceUrl: json.listingUrl || '',\n      listingDomain: listingHost,\n      phones,\n      emails,\n      websites: website ? [website] : [],\n      addressCandidates: address ? [address] : [],\n      evidenceCount: 1,\n      pageRole: 'listing',\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "build-website-enrichment-jobs",
+      "name": "Build Website Enrichment Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all().map((item) => item.json);\n\nfunction hostOf(raw) {\n  try {\n    return new URL(raw).hostname.replace(/^www\\./i, '').toLowerCase();\n  } catch (error) {\n    return '';\n  }\n}\n\nconst output = [];\n\nfor (const lead of itemsIn) {\n  const website = Array.isArray(lead.websites) && lead.websites.length ? lead.websites[0] : '';\n  if (!website) {\n    continue;\n  }\n\n  let base;\n  try {\n    base = new URL(website);\n  } catch (error) {\n    continue;\n  }\n\n  const listingHost = hostOf(lead.sourceUrl || '');\n  const websiteHost = hostOf(website);\n  const shouldFetchContactPages = listingHost !== websiteHost || lead.listingDomain !== websiteHost;\n  const paths = shouldFetchContactPages ? ['/', '/contact', '/contact-us', '/about-us'] : ['/contact', '/contact-us'];\n  const seen = new Set();\n\n  for (const pagePath of paths.slice(0, 3)) {\n    const url = new URL(pagePath, base.origin).toString();\n    if (seen.has(url)) continue;\n    seen.add(url);\n\n    output.push({\n      json: {\n        ...lead,\n        fetchUrl: url,\n        websiteOrigin: base.origin,\n        websiteHost,\n      },\n    });\n  }\n}\n\nif (output.length === 0) {\n  return [{ json: { _noWebsiteJobs: true } }];\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "fetch-website-pages",
+      "name": "Fetch Website Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        420
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$json.fetchUrl}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; n8n Lead Workflow/1.0; +https://n8n.io)"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "responseBody",
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "if-has-website-jobs",
+      "name": "Has Website Jobs",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2900,
+        540
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-fetch-url",
+              "leftValue": "={{ $json.fetchUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "attach-site-response",
+      "name": "Attach Site Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const sourceItems = $('Build Website Enrichment Jobs').all();\nconst responseItems = $input.all();\nconst count = Math.max(sourceItems.length, responseItems.length);\nconst output = [];\n\nfor (let index = 0; index < count; index++) {\n  const source = sourceItems[index]?.json || {};\n  const response = responseItems[index]?.json || {};\n  output.push({\n    json: Object.assign({}, source, response),\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "capture-site-fetch-errors",
+      "name": "Capture Site Fetch Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3340,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nfunction getStatus(json) {\n  if (json && typeof json.statusCode === 'number') return json.statusCode;\n  if (json && json.response && typeof json.response.statusCode === 'number') return json.response.statusCode;\n  return '';\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const json = item.json || {};\n  const status = getStatus(json);\n  const body = getBody(json);\n  const errorMessage = json.error && json.error.message ? String(json.error.message) : '';\n  const shouldLog = errorMessage || (status && (status < 200 || status >= 300)) || !body;\n\n  if (!shouldLog) {\n    continue;\n  }\n\n  output.push({\n    json: {\n      Timestamp: new Date().toISOString(),\n      Stage: 'Official Site Fetch',\n      Category: json.category || '',\n      City: json.city || '',\n      Source: json.sourceLabel || '',\n      URL: json.fetchUrl || '',\n      Status: status || '',\n      Message: errorMessage || (!body ? 'Empty response body' : 'Non-2xx response'),\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "append-site-logs",
+      "name": "Append Site Logs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3560,
+        320
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Workflow Logs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "extract-website-fragments",
+      "name": "Extract Website Fragments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3340,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all();\n\nfunction decodeHtmlEntities(value) {\n  return String(value || '')\n    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&#x2F;/gi, '/')\n    .replace(/&#([0-9]+);/g, (_, code) => String.fromCharCode(Number(code)));\n}\n\nfunction getBody(json) {\n  if (typeof json === 'string') return json;\n  if (!json || typeof json !== 'object') return '';\n  if (typeof json.responseBody === 'string') return json.responseBody;\n  if (typeof json.data === 'string') return json.data;\n  if (typeof json.body === 'string') return json.body;\n  if (typeof json.response === 'string') return json.response;\n  if (json.data && typeof json.data.body === 'string') return json.data.body;\n  if (json.response && typeof json.response.body === 'string') return json.response.body;\n  if (json.response && typeof json.response.data === 'string') return json.response.data;\n  return '';\n}\n\nfunction stripHtml(value) {\n  return decodeHtmlEntities(value)\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction pickFirstMatch(patterns, html) {\n  for (const pattern of patterns) {\n    const match = html.match(pattern);\n    if (match && match[1]) {\n      return decodeHtmlEntities(match[1]).replace(/\\s+/g, ' ').trim();\n    }\n  }\n  return '';\n}\n\nfunction extractEmails(blob) {\n  const matches = blob.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || [];\n  return [...new Set(matches.map((entry) => entry.toLowerCase()))];\n}\n\nfunction extractPhones(blob) {\n  const matches = blob.match(/(?:\\+?91[\\s()-]*)?(?:0[\\s()-]*)?(?:\\d[\\s()-]*){10,12}/g) || [];\n  return [...new Set(matches.map((entry) => entry.trim()))];\n}\n\nfunction extractAddress(text, city) {\n  const compactCity = String(city || '').trim();\n  const lines = text\n    .split(/(?<=[.!?])\\s+|\\s{2,}|\\n+/)\n    .map((line) => line.trim())\n    .filter(Boolean);\n\n  for (const line of lines) {\n    const hasCity = compactCity && line.toLowerCase().includes(compactCity.toLowerCase());\n    const hasPin = /\\b\\d{6}\\b/.test(line);\n    const longEnough = line.length >= 18;\n    if (longEnough && (hasCity || hasPin || /address/i.test(line))) {\n      return line.slice(0, 240);\n    }\n  }\n\n  return '';\n}\n\nconst output = [];\n\nfor (const item of itemsIn) {\n  const json = item.json || {};\n  const html = getBody(json);\n  if (!html) continue;\n\n  const text = stripHtml(html);\n  const organizationName = pickFirstMatch([\n    /<meta[^>]+property=[\"']og:site_name[\"'][^>]+content=[\"']([^\"']+)[\"']/i,\n    /<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']/i,\n    /<h1[^>]*>([\\s\\S]*?)<\\/h1>/i,\n    /<title[^>]*>([\\s\\S]*?)<\\/title>/i,\n  ], html) || json.organizationName || '';\n\n  output.push({\n    json: {\n      requestKey: json.requestKey,\n      category: json.category,\n      city: json.city,\n      leadCount: json.leadCount,\n      inputRowNumber: json.inputRowNumber,\n      requestedAt: json.requestedAt,\n      organizationKey: json.organizationKey,\n      organizationName,\n      orgHint: json.orgHint || '',\n      sourceLabel: 'official-site',\n      sourceUrl: json.fetchUrl || '',\n      listingDomain: json.websiteHost || '',\n      phones: extractPhones(text + ' ' + html),\n      emails: extractEmails(text + ' ' + html),\n      websites: json.websiteOrigin ? [json.websiteOrigin] : [],\n      addressCandidates: (() => {\n        const address = extractAddress(text, json.city || '');\n        return address ? [address] : [];\n      })(),\n      evidenceCount: 1,\n      pageRole: 'official-site',\n    },\n  });\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "combine-all-fragments",
+      "name": "Combine All Fragments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const listingFragments = $('Extract Raw Lead Fragments').all();\nconst websiteFragments = $input.all().filter((item) => !(item.json && item.json._websiteBranchEmpty));\nconst combined = listingFragments.concat(websiteFragments);\nreturn combined.length ? combined : listingFragments;"
+      }
+    },
+    {
+      "id": "skip-website-enrichment",
+      "name": "Skip Website Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        720
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: { _websiteBranchEmpty: true } }];"
+      }
+    },
+    {
+      "id": "aggregate-and-verify-leads",
+      "name": "Aggregate And Verify Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3780,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all().map((item) => item.json);\n\nconst directoryHosts = [\n  'justdial.com',\n  'sulekha.com',\n  'indiamart.com',\n  'webindia123.com',\n  'asklaila.com',\n  'yellowpages.webindia123.com',\n];\n\nfunction slugify(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-+|-+$/g, '');\n}\n\nfunction hostOf(raw) {\n  try {\n    return new URL(raw).hostname.replace(/^www\\./i, '').toLowerCase();\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction looksLikeDirectory(raw) {\n  const host = hostOf(raw);\n  return directoryHosts.some((candidate) => host === candidate || host.endsWith('.' + candidate));\n}\n\nfunction unique(values) {\n  return [...new Set(values.filter(Boolean))];\n}\n\nfunction normaliseName(value) {\n  return String(value || '')\n    .replace(/\\s*[|:-]\\s*(justdial|sulekha|indiamart|webindia123|asklaila).*$/i, '')\n    .replace(/\\s{2,}/g, ' ')\n    .trim();\n}\n\nfunction chooseBestName(names) {\n  const cleaned = unique(names.map(normaliseName)).filter(Boolean);\n  cleaned.sort((a, b) => b.length - a.length);\n  return cleaned[0] || '';\n}\n\nfunction normalisePhone(raw) {\n  const digits = String(raw || '').replace(/\\D+/g, '');\n  let national = '';\n\n  if (digits.length === 10) {\n    national = digits;\n  } else if (digits.length === 11 && digits.startsWith('0')) {\n    national = digits.slice(1);\n  } else if (digits.length === 12 && digits.startsWith('91')) {\n    national = digits.slice(2);\n  } else if (digits.length === 13 && digits.startsWith('910')) {\n    national = digits.slice(3);\n  } else {\n    return '';\n  }\n\n  if (!/^\\d{10}$/.test(national)) return '';\n  if (/^(\\d)\\1{9}$/.test(national)) return '';\n  if (national === '0000000000') return '';\n\n  return '+91' + national;\n}\n\nfunction validEmail(raw) {\n  const email = String(raw || '').trim().toLowerCase();\n  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$/i.test(email)) return '';\n  if (/^(noreply|no-reply|donotreply|do-not-reply|test|sample|dummy|example)/i.test(email.split('@')[0])) return '';\n  if (/(example\\.com|example\\.org|test\\.com|yourdomain\\.com)$/i.test(email)) return '';\n  return email;\n}\n\nfunction chooseBestWebsite(websites) {\n  const valid = unique(websites)\n    .filter((url) => /^https?:\\/\\//i.test(url))\n    .filter((url) => !looksLikeDirectory(url));\n\n  valid.sort((a, b) => {\n    const aScore = a.startsWith('https://') ? 1 : 0;\n    const bScore = b.startsWith('https://') ? 1 : 0;\n    if (bScore !== aScore) return bScore - aScore;\n    return a.length - b.length;\n  });\n\n  return valid[0] || '';\n}\n\nfunction chooseBestAddress(addresses, city) {\n  const valid = unique(addresses).filter(Boolean);\n  valid.sort((a, b) => {\n    const aScore = Number(a.toLowerCase().includes(String(city || '').toLowerCase())) + Number(/\\b\\d{6}\\b/.test(a));\n    const bScore = Number(b.toLowerCase().includes(String(city || '').toLowerCase())) + Number(/\\b\\d{6}\\b/.test(b));\n    if (bScore !== aScore) return bScore - aScore;\n    return b.length - a.length;\n  });\n  return valid[0] || '';\n}\n\nfunction confidenceScore(phoneVerified, emailVerified, website) {\n  if (phoneVerified && emailVerified && website) return 'HIGH';\n  if (phoneVerified && website) return 'MEDIUM';\n  if (phoneVerified || emailVerified) return 'LOW';\n  return 'LOW';\n}\n\nfunction confidenceWeight(label) {\n  if (label === 'HIGH') return 3;\n  if (label === 'MEDIUM') return 2;\n  if (label === 'LOW') return 1;\n  return 0;\n}\n\nconst grouped = new Map();\n\nfor (const fragment of itemsIn) {\n  const key = fragment.organizationKey || (\n    String(fragment.requestKey || '')\n    + '|'\n    + slugify(fragment.organizationName || fragment.orgHint || '')\n  );\n\n  if (!grouped.has(key)) {\n    grouped.set(key, {\n      requestKey: fragment.requestKey,\n      category: fragment.category,\n      city: fragment.city,\n      leadCount: fragment.leadCount,\n      names: [],\n      phones: [],\n      emails: [],\n      websites: [],\n      addresses: [],\n      sources: [],\n      sourceUrls: [],\n      evidenceCount: 0,\n    });\n  }\n\n  const bucket = grouped.get(key);\n  bucket.names.push(fragment.organizationName || fragment.orgHint || '');\n  bucket.phones.push(...(Array.isArray(fragment.phones) ? fragment.phones : []));\n  bucket.emails.push(...(Array.isArray(fragment.emails) ? fragment.emails : []));\n  bucket.websites.push(...(Array.isArray(fragment.websites) ? fragment.websites : []));\n  bucket.addresses.push(...(Array.isArray(fragment.addressCandidates) ? fragment.addressCandidates : []));\n  bucket.sources.push(fragment.sourceLabel || '');\n  bucket.sourceUrls.push(fragment.sourceUrl || '');\n  bucket.evidenceCount += Number(fragment.evidenceCount || 0);\n}\n\nconst candidates = [];\n\nfor (const bucket of grouped.values()) {\n  const organizationName = chooseBestName(bucket.names);\n  const verifiedPhones = unique(bucket.phones.map(normalisePhone)).filter(Boolean);\n  const verifiedEmails = unique(bucket.emails.map(validEmail)).filter(Boolean);\n  const website = chooseBestWebsite(bucket.websites);\n  const address = chooseBestAddress(bucket.addresses, bucket.city);\n  const phoneNumber = verifiedPhones[0] || '';\n  const email = verifiedEmails[0] || '';\n  const phoneVerified = Boolean(phoneNumber);\n  const emailVerified = Boolean(email);\n  const confidence = confidenceScore(phoneVerified, emailVerified, website);\n\n  candidates.push({\n    json: {\n      requestKey: bucket.requestKey,\n      category: bucket.category,\n      city: bucket.city,\n      leadCount: bucket.leadCount,\n      organizationName,\n      phoneNumber,\n      phoneVerified,\n      email,\n      emailVerified,\n      website,\n      address,\n      confidenceScore: confidence,\n      confidenceWeight: confidenceWeight(confidence),\n      evidenceCount: bucket.evidenceCount,\n      sourceCount: unique(bucket.sources).length,\n      dedupeOrgKey: slugify(bucket.city) + '|' + slugify(organizationName || website || phoneNumber || email),\n    },\n  });\n}\n\ncandidates.sort((a, b) => {\n  const left = a.json;\n  const right = b.json;\n  if (right.confidenceWeight !== left.confidenceWeight) return right.confidenceWeight - left.confidenceWeight;\n  if (right.evidenceCount !== left.evidenceCount) return right.evidenceCount - left.evidenceCount;\n  if (right.sourceCount !== left.sourceCount) return right.sourceCount - left.sourceCount;\n  return String(left.organizationName || '').localeCompare(String(right.organizationName || ''));\n});\n\nconst seenPerRequest = new Map();\nconst output = [];\n\nfor (const item of candidates) {\n  const lead = item.json;\n  if (!seenPerRequest.has(lead.requestKey)) {\n    seenPerRequest.set(lead.requestKey, {\n      orgs: new Set(),\n      phones: new Set(),\n      emails: new Set(),\n    });\n  }\n\n  const seen = seenPerRequest.get(lead.requestKey);\n  if (seen.orgs.has(lead.dedupeOrgKey)) continue;\n  if (lead.phoneNumber && seen.phones.has(lead.phoneNumber)) continue;\n  if (lead.email && seen.emails.has(lead.email)) continue;\n\n  seen.orgs.add(lead.dedupeOrgKey);\n  if (lead.phoneNumber) seen.phones.add(lead.phoneNumber);\n  if (lead.email) seen.emails.add(lead.email);\n  output.push(item);\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "select-best-verified-leads",
+      "name": "Select Best Verified Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const itemsIn = $input.all().map((item) => item.json);\n\nfunction confidenceWeight(label) {\n  if (label === 'HIGH') return 3;\n  if (label === 'MEDIUM') return 2;\n  if (label === 'LOW') return 1;\n  return 0;\n}\n\nconst grouped = new Map();\n\nfor (const lead of itemsIn) {\n  if (!lead.phoneVerified && !lead.emailVerified) {\n    continue;\n  }\n\n  if (!grouped.has(lead.requestKey)) {\n    grouped.set(lead.requestKey, []);\n  }\n\n  grouped.get(lead.requestKey).push(lead);\n}\n\nconst output = [];\n\nfor (const leads of grouped.values()) {\n  leads.sort((a, b) => {\n    const weightDelta = confidenceWeight(b.confidenceScore) - confidenceWeight(a.confidenceScore);\n    if (weightDelta !== 0) return weightDelta;\n    if ((b.evidenceCount || 0) !== (a.evidenceCount || 0)) return (b.evidenceCount || 0) - (a.evidenceCount || 0);\n    if ((b.sourceCount || 0) !== (a.sourceCount || 0)) return (b.sourceCount || 0) - (a.sourceCount || 0);\n    return String(a.organizationName || '').localeCompare(String(b.organizationName || ''));\n  });\n\n  const limit = Number(leads[0].leadCount || 0);\n  for (const lead of leads.slice(0, limit)) {\n    output.push({\n      json: {\n        ...lead,\n        timestamp: new Date().toISOString(),\n      },\n    });\n  }\n}\n\nreturn output;"
+      }
+    },
+    {
+      "id": "prepare-output-rows",
+      "name": "Prepare Output Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4220,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map((item) => ({\n  json: {\n    'Organization Name': item.json.organizationName || '',\n    'Category': item.json.category || '',\n    'City': item.json.city || '',\n    'Phone Number': item.json.phoneNumber || '',\n    'Phone Verified': item.json.phoneVerified ? 'TRUE' : 'FALSE',\n    'Email': item.json.email || '',\n    'Email Verified': item.json.emailVerified ? 'TRUE' : 'FALSE',\n    'Website': item.json.website || '',\n    'Address': item.json.address || '',\n    'Confidence Score': item.json.confidenceScore || 'LOW',\n    'Timestamp': item.json.timestamp || new Date().toISOString(),\n  },\n}));"
+      }
+    },
+    {
+      "id": "append-lead-rows",
+      "name": "Append Lead Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        4440,
+        540
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Verified Leads"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Lead Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Lead Requests": {
+      "main": [
+        [
+          {
+            "node": "Normalize Request Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Request Rows": {
+      "main": [
+        [
+          {
+            "node": "Build Search Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Search Jobs": {
+      "main": [
+        [
+          {
+            "node": "Search Bing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Bing": {
+      "main": [
+        [
+          {
+            "node": "Attach Search Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Search Response": {
+      "main": [
+        [
+          {
+            "node": "Capture Search Fetch Errors",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Parse Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Search Fetch Errors": {
+      "main": [
+        [
+          {
+            "node": "Append Search Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Search Results": {
+      "main": [
+        [
+          {
+            "node": "Consolidate Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidate Candidates": {
+      "main": [
+        [
+          {
+            "node": "Fetch Candidate Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Candidate Pages": {
+      "main": [
+        [
+          {
+            "node": "Attach Candidate Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Candidate Response": {
+      "main": [
+        [
+          {
+            "node": "Capture Candidate Fetch Errors",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract Raw Lead Fragments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Candidate Fetch Errors": {
+      "main": [
+        [
+          {
+            "node": "Append Candidate Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Raw Lead Fragments": {
+      "main": [
+        [
+          {
+            "node": "Build Website Enrichment Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Website Enrichment Jobs": {
+      "main": [
+        [
+          {
+            "node": "Has Website Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Website Jobs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Website Pages",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Website Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Website Pages": {
+      "main": [
+        [
+          {
+            "node": "Attach Site Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Site Response": {
+      "main": [
+        [
+          {
+            "node": "Capture Site Fetch Errors",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract Website Fragments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Site Fetch Errors": {
+      "main": [
+        [
+          {
+            "node": "Append Site Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Website Fragments": {
+      "main": [
+        [
+          {
+            "node": "Combine All Fragments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Website Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Combine All Fragments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine All Fragments": {
+      "main": [
+        [
+          {
+            "node": "Aggregate And Verify Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate And Verify Leads": {
+      "main": [
+        [
+          {
+            "node": "Select Best Verified Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Best Verified Leads": {
+      "main": [
+        [
+          {
+            "node": "Prepare Output Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Output Rows": {
+      "main": [
+        [
+          {
+            "node": "Append Lead Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {}
+}
